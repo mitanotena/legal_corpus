@@ -1,0 +1,43 @@
+"""Neutral legal corpus core for Wakili product and Scraper Ops backends."""
+
+from .corpus_boundary import (
+    LEGAL_SAFETY_MODULES,
+    PRODUCT_BACKEND_ROLE,
+    SCRAPER_OPS_ROLE,
+    SHARED_CORPUS_OWNER,
+    UNKNOWN_ROLE,
+    CorpusBoundary,
+    ModuleParity,
+    backend_role,
+    canonical_code_backend_dir,
+    default_chroma_dir,
+    default_live_db_path,
+    legal_safety_drift,
+    legal_safety_module_parity,
+    product_backend_dir_for,
+    resolve_corpus_boundary,
+    scraper_ops_backend_dir_for,
+    shared_legal_corpus_dir_for,
+    workspace_root_for_backend,
+)
+
+__all__ = [
+    "LEGAL_SAFETY_MODULES",
+    "PRODUCT_BACKEND_ROLE",
+    "SCRAPER_OPS_ROLE",
+    "SHARED_CORPUS_OWNER",
+    "UNKNOWN_ROLE",
+    "CorpusBoundary",
+    "ModuleParity",
+    "backend_role",
+    "canonical_code_backend_dir",
+    "default_chroma_dir",
+    "default_live_db_path",
+    "legal_safety_drift",
+    "legal_safety_module_parity",
+    "product_backend_dir_for",
+    "resolve_corpus_boundary",
+    "scraper_ops_backend_dir_for",
+    "shared_legal_corpus_dir_for",
+    "workspace_root_for_backend",
+]
