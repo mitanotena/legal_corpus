@@ -1,7 +1,8 @@
-# /** file synthesis_core.py shared legal answer synthesis contract for Wakili brain [notes: supports optional model token callbacks for server-sent streaming] */
+# /** file synthesis_core.py shared legal answer synthesis contract for Wakili brain [notes: supports simple-language style, model token callbacks, and agentic tool calling loop] */
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -56,10 +57,28 @@ from shared.legal_corpus.brain.stare_decisis import (
     render_stare_decisis_graph_lines,
 )
 
+NATURAL_CHAT_TOKENS = 400
+LEGAL_CHAT_TOKENS = 900
+VOICE_CHAT_TOKENS = 220
+
+CONVERSATIONAL_LEGAL_PREAMBLES = [
+    "Here's my analysis of that question:",
+    "Let me break this down for you:",
+    "Looking at the relevant law and cases, here's what I found:",
+    "This is an important legal question. Here's how the law addresses it:",
+]
+
 
 class ModelUsageLike(Protocol):
     def to_dict(self) -> dict[str, Any]:
         ...
+
+
+class ModelRouterResponseLike(Protocol):
+    """Matches the ModelResponse dataclass from model_router.py"""
+    content: str | None
+    tool_calls: list[dict[str, Any]] | None
+    usage: Any  # Bypass strict typing to avoid cross-module import issues
 
 
 class ModelRouterLike(Protocol):
@@ -68,11 +87,26 @@ class ModelRouterLike(Protocol):
         *,
         mode: str,
         channel: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
         token_callback: Callable[[str], None] | None = None,
-    ) -> tuple[str, ModelUsageLike]:
+        reasoning_callback: Callable[[str], None] | None = None,
+    ) -> ModelRouterResponseLike:
         ...
+
+
+def _coerce_router_response(response: object) -> tuple[str, Any, list[dict[str, Any]] | None]:
+    if isinstance(response, tuple):
+        content = str(response[0] or "") if len(response) >= 1 else ""
+        usage = response[1] if len(response) >= 2 else None
+        return content, usage, None
+    content = str(getattr(response, "content", "") or "")
+    usage = getattr(response, "usage", None)
+    raw_tool_calls = getattr(response, "tool_calls", None)
+    tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else None
+    return content, usage, tool_calls
 
 
 def _normalized_text_key(value: str) -> str:
@@ -124,6 +158,90 @@ def _formatted_instruction_list(items: list[str]) -> str:
     if not items:
         return "- None recorded"
     return "\n".join(f"- {item}" for item in items)
+
+
+def _build_conversational_preamble(user_message: str, dialogue_state: str) -> str:
+    """
+    Generate a brief conversational lead-in before legal analysis.
+    This makes the response feel like a conversation turn, not a report dump.
+    """
+    del dialogue_state
+    seed = _normalized_text_key(user_message)
+    if "case" in seed or "judgment" in seed or "v " in seed:
+        return "Looking at the relevant law and cases, here's what I found:"
+    if "why" in seed or "how" in seed:
+        return "Let me break this down for you:"
+    return CONVERSATIONAL_LEGAL_PREAMBLES[sum(ord(char) for char in seed) % len(CONVERSATIONAL_LEGAL_PREAMBLES)]
+
+
+def _build_conversational_prompt_instructions() -> str:
+    return (
+        "For this turn, respond naturally as a Tanzanian legal conversation partner.\n"
+        "- Do not force CREAC, IRAC, memo headings, or labels unless the user asks for formal analysis.\n"
+        "- Open like a lawyer in conversation: acknowledge the question, then give the practical first step.\n"
+        "- You may use phrases like \"Good question\" or \"Let me check the procedural posture\" when they fit.\n"
+        "- Ask only for essential missing details, especially dates, court level, parties, and jurisdiction.\n"
+        "- Never invent case law, statutes, or section numbers; say when verified authority has not been retrieved."
+    )
+
+
+def _build_natural_chat_fallback_answer(
+    *,
+    prompt: str,
+    missing_facts: list[str],
+) -> str:
+    """Build a safe conversational answer when the chat LLM is unavailable."""
+    normalized = _normalized_text_key(prompt)
+    if any(term in normalized for term in ("draft", "write", "prepare", "agreement", "contract", "lease")):
+        return (
+            "I can help draft that. To make it usable, send me the parties, key dates, governing jurisdiction, "
+            "the transaction or dispute background, and the outcome you want the document to achieve."
+        )
+    if any(term in normalized for term in ("appeal", "rufaa")):
+        return (
+            "You may be able to appeal, but the first things to confirm are the judgment date, the court that issued it, "
+            "and whether the decision was final or interlocutory. Once I have those, I can help map the deadline, forum, "
+            "and documents needed."
+        )
+    if any(term in normalized for term in ("bail", "dhamana")):
+        return (
+            "Bail usually turns on the offence charged, the court, the procedural stage, and any statutory restrictions. "
+            "Tell me the charge, court level, and whether this is before trial, after conviction, or pending appeal."
+        )
+    if "adverse possession" in normalized:
+        return (
+            "Adverse possession is the idea that a person who has occupied land openly, continuously, and without the owner's effective interruption "
+            "may eventually defeat the registered owner's claim after the legally required time has run. For Tanzania, I would verify the current limitation "
+            "provisions, land-registration position, and recent case law before treating this as filing-ready. The key facts are when occupation began, "
+            "whether it was hostile rather than by permission, whether the owner interrupted possession, and what land records show."
+        )
+    if "criminal" in normalized and any(term in normalized for term in ("procedure", "process", "steps", "case")):
+        return (
+            "A criminal case usually moves through complaint or arrest, investigation, charge, first appearance or plea, "
+            "bail consideration, disclosure and mentions, hearing or trial, judgment, sentence if there is a conviction, "
+            "and then appeal or revision if a party challenges the outcome. To make this specific, tell me the offence, "
+            "court level, and whether the matter is at arrest, plea, trial, sentence, or appeal stage."
+        )
+    if missing_facts:
+        return (
+            "I can help, but I need a few facts before giving a useful legal view: "
+            f"{'; '.join(missing_facts[:3])}."
+        )
+    return (
+        "I can help with that. Give me the key facts, jurisdiction, dates, and what you want to achieve, "
+        "and I will separate practical analysis from any authority that still needs verification."
+    )
+
+
+def _contains_internal_fallback_scaffold(value: object) -> bool:
+    normalized = _normalized_text_key(value)
+    internal_markers = (
+        "give a natural working answer",
+        "no specific wakili authority was retrieved for citation in this turn",
+        "start with the practical steps or intake questions the lawyer needs",
+        "if the user wants a filing-ready position",
+    )
+    return any(marker in normalized for marker in internal_markers)
 
 
 def _build_matter_standing_instruction_prompt(
@@ -340,6 +458,84 @@ def _is_element_visibility_prompt(prompt: str) -> bool:
     return any(cue in normalized for cue in cues)
 
 
+def _is_legal_research_query(prompt: str) -> bool:
+    """
+    Distinguish broad legal research from specific calculation requests.
+
+    RESEARCH: "tell me about X", "show me cases", "what is the law on",
+              "explain", "how do courts apply", "overview", "guide to"
+
+    CALCULATION: "is my claim time-barred", "can I file", "does this apply to my case",
+                 specific fact patterns requiring analysis gates
+    """
+    normalized = " ".join(str(prompt or "").lower().split())
+    if not normalized:
+        return True
+
+    research_markers = (
+        "tell me about",
+        "show me",
+        "what are the",
+        "how do",
+        "how does",
+        "explain",
+        "what is the law",
+        "cases about",
+        "case law on",
+        "principle of",
+        "overview",
+        "guide to",
+        "information on",
+        "learn about",
+        "understand",
+        "area of law",
+        "legal position",
+        "recent developments",
+        "leading cases",
+        "key principles",
+        "generally",
+        "typically",
+        "what happens when",
+    )
+    calculation_markers = (
+        "my case",
+        "my claim",
+        "my matter",
+        "my situation",
+        "this case",
+        "this claim",
+        "this matter",
+        "this situation",
+        "can i file",
+        "can i sue",
+        "do i have",
+        "is my",
+        "claim barred",
+        "barred by limitation",
+        "within limitation",
+        "does this apply to me",
+        "what should i do",
+        "time barred",
+        "time-barred",
+        "expired",
+        "deadline",
+        "accrual date",
+        "how long do i have",
+    )
+
+    has_research = any(marker in normalized for marker in research_markers)
+    has_calculation = any(marker in normalized for marker in calculation_markers)
+
+    if has_calculation and not has_research:
+        return False
+    if has_research:
+        return True
+
+    word_count = len(normalized.split())
+    has_my = " my " in f" {normalized} "
+    return word_count < 15 and not has_my
+
+
 def _is_burden_visibility_prompt(prompt: str) -> bool:
     normalized = " ".join(str(prompt or "").lower().split())
     if not normalized:
@@ -516,6 +712,12 @@ def render_answer(
     model_router_factory: type[ModelRouterLike] | None = None,
     synthesis_system_prompt: str = "",
     token_callback: Callable[[str], None] | None = None,
+    reasoning_callback: Callable[[str], None] | None = None,
+    synthesis_mode_override: str | None = None,
+    natural_chat_response: bool = False,
+    simple_language: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_executor: Callable[[str, dict[str, Any]], str] | None = None,
 ) -> tuple[str, bool, dict[str, Any]]:
     supporting_arguments = _dedupe_text_blocks(list(supporting_arguments or []))
     opposing_arguments = _dedupe_text_blocks(
@@ -536,21 +738,22 @@ def render_answer(
     rule = issue_map[0]["ruleSummary"] if issue_map else "Apply the strongest verified Tanzanian authority."
     application = issue_map[0]["applicationSummary"] if issue_map else "Fit the authority to the proven facts conservatively."
     provisional = issue_map[0]["provisionalConclusion"] if issue_map else "Manual verification remains necessary."
+    is_research_query = _is_legal_research_query(prompt)
     preferred_legal_test = _preferred_legal_test_evidence(graph_evidence)
     preferred_burden = _preferred_burden_evidence(graph_evidence)
     burden_assessment = assess_burden_certainty(prompt=prompt, preferred_burden=preferred_burden)
     conflict_analysis = _conflict_analysis_summary(graph_evidence)
     authority_safety = analyze_authority_safety(graph_evidence=graph_evidence)
     source_safety = analyze_source_safety(graph_evidence=graph_evidence)
-    limitation_analysis = analyze_limitation(prompt=prompt, graph_evidence=graph_evidence)
+    limitation_analysis = None if is_research_query else analyze_limitation(prompt=prompt, graph_evidence=graph_evidence)
     procedural_history = analyze_procedural_history(graph_evidence=graph_evidence)
     practical_outcomes = analyze_practical_outcomes(graph_evidence=graph_evidence)
     distinguishing = analyze_distinguishing(graph_evidence=graph_evidence)
     stare_decisis = analyze_stare_decisis(graph_evidence=graph_evidence, prompt=prompt)
-    if _is_element_visibility_prompt(prompt) and preferred_legal_test:
+    if not is_research_query and _is_element_visibility_prompt(prompt) and preferred_legal_test:
         rule = _legal_test_rule_summary(preferred_legal_test)
         application = _legal_test_application_summary(preferred_legal_test)
-    elif is_limitation_prompt(prompt) and limitation_analysis is not None:
+    elif not is_research_query and is_limitation_prompt(prompt) and limitation_analysis is not None:
         rule = render_limitation_rule(limitation_analysis)
         application = render_limitation_application(limitation_analysis)
         provisional = _limitation_conclusion(limitation_analysis)
@@ -815,12 +1018,12 @@ def render_answer(
         ][:3]
         detail_parts = [
             "\n".join(sections),
-            "Supporting Position:\n" + "\n".join(f"- {item}" for item in supporting_bullets),
-            "Opposing Position:\n" + "\n".join(f"- {item}" for item in opposing_arguments[:3]),
-            "Rebuttal Strategy:\n" + "\n".join(f"- {item}" for item in rebuttals[:3]),
+            "Why that position is supported:\n" + "\n".join(f"- {item}" for item in supporting_bullets),
+            "What the other side may argue:\n" + "\n".join(f"- {item}" for item in opposing_arguments[:3]),
+            "How I would treat that risk:\n" + "\n".join(f"- {item}" for item in rebuttals[:3]),
         ]
         if graph_lines:
-            detail_parts.append("Graph Evidence:\n" + "\n".join(graph_lines[:24]))
+            detail_parts.append("Authority signals:\n" + "\n".join(graph_lines[:24]))
         if missing_facts:
             detail_parts.append("Missing Facts:\n" + "\n".join(f"- {item}" for item in missing_facts[:5]))
         if dead_law_rewrites:
@@ -829,7 +1032,9 @@ def render_answer(
             detail_parts.append("Suppressed Authorities:\n" + "\n".join(suppressed_lines))
         if recommended_next_actions:
             detail_parts.append("Recommended Next Steps:\n" + "\n".join(f"- {item}" for item in recommended_next_actions[:5]))
-        answer = "\n\n".join(detail_parts)
+        legal_analysis = "\n\n".join(detail_parts)
+        preamble = _build_conversational_preamble(prompt, "DEEP_RESEARCH")
+        answer = f"{preamble}\n\n{legal_analysis}"
         spoken_summary = False
 
     memory_context = [
@@ -865,6 +1070,7 @@ def render_answer(
         "partialResult": False,
     }
     llm_text = ""
+    
     if model_router_factory is not None:
         router = model_router_factory()
         system_prompt = _build_matter_standing_instruction_prompt(
@@ -877,63 +1083,170 @@ def render_answer(
             prompt=prompt,
             standing_instructions=matter_standing_instructions,
         )
-        synthesis_mode = _synthesis_model_mode(
+        synthesis_mode = str(synthesis_mode_override or "").strip().lower() or _synthesis_model_mode(
             prompt=prompt,
             standing_instructions=matter_standing_instructions,
         )
-        llm_text, usage = router.complete(
-            mode=synthesis_mode,
-            channel=channel,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": "".join(
-                        [
-                            f"CLIENT QUERY:\n{prompt}\n\n",
-                            f"REQUESTED ANSWER SHAPE:\n- Framework: {final_framework}\n- Channel: {channel}\n\n",
-                            (
-                                "RECENT MATTER MEMORY (LAYER 3):\n"
-                                + "\n".join(f"- {item}" for item in memory_context)
-                                + "\n\n"
-                                if memory_context
-                                else ""
-                            ),
-                            (
-                                "RETRIEVED LEGAL EVIDENCE (LAYER 2):\n"
-                                + "\n".join(
-                                    line
-                                    for line in (
-                                        "\n".join(graph_lines[:24]).splitlines()
-                                        if graph_evidence
-                                        else []
-                                    )
+        if natural_chat_response:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                f"{_build_conversational_prompt_instructions()}"
+            ).strip()
+        if simple_language:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "SIMPLE LANGUAGE MODE:\n"
+                "- Use plain words and short sentences.\n"
+                "- Define legal terms briefly the first time they appear.\n"
+                "- Keep legal accuracy, authority caution, and citation safety unchanged.\n"
+                "- Do not talk down to the lawyer; simplify the explanation, not the legal reasoning."
+            ).strip()
+        
+        # Base messages payload
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": "".join(
+                    [
+                        f"CLIENT QUERY:\n{prompt}\n\n",
+                        (
+                            "REQUESTED ANSWER SHAPE:\n"
+                            "- Natural conversational answer\n"
+                            "- Ask only for essential missing details\n\n"
+                            if natural_chat_response
+                            else f"REQUESTED ANSWER SHAPE:\n- Framework: {final_framework}\n- Channel: {channel}\n\n"
+                        ),
+                        (
+                            "STYLE PREFERENCE:\n- Simple language: explain legal terms briefly and use shorter sentences.\n\n"
+                            if simple_language
+                            else ""
+                        ),
+                        (
+                            "RECENT MATTER MEMORY (LAYER 3):\n"
+                            + "\n".join(f"- {item}" for item in memory_context)
+                            + "\n\n"
+                            if memory_context
+                            else ""
+                        ),
+                        (
+                            "RETRIEVED LEGAL EVIDENCE (LAYER 2):\n"
+                            + "\n".join(
+                                line
+                                for line in (
+                                    "\n".join(graph_lines[:24]).splitlines()
+                                    if graph_evidence
+                                    else []
                                 )
-                                + "\n\n"
-                                if graph_evidence and graph_lines
-                                else ""
-                            ),
-                            f"CURRENT DRAFT:\n{answer}",
-                        ]
-                    ),
-                },
-            ],
-            max_tokens=450 if channel == "chat" else 220,
-            token_callback=token_callback,
-        )
-        usage_dict = usage.to_dict()
+                            )
+                            + "\n\n"
+                            if graph_evidence and graph_lines
+                            else ""
+                        ),
+                        (
+                            "GENERATE THE FINAL RESPONSE DIRECTLY:\n"
+                            "- Open with the conversational lead-in already present in the material.\n"
+                            "- Preserve citations, statutes, jurisdiction, and balanced analysis.\n"
+                            "- Do not compress this into a brief text message.\n"
+                            "- Do not use headings named Supporting Position, Opposing Position, Rebuttal Strategy, or Graph Evidence.\n\n"
+                            f"CURRENT DRAFT:\n{answer}"
+                        ),
+                    ]
+                ),
+            },
+        ]
+
+        # AGENTIC LOOP: Support for tool calling (max 3 loops to prevent runaway)
+        max_loops = 3
+        for loop_index in range(max_loops):
+            is_final_loop = (loop_index == max_loops - 1)
+            
+            # If on final loop, force strict text generation to prevent hanging tool calls
+            active_tools = None if is_final_loop else tools
+            active_tool_choice = "none" if is_final_loop else ("auto" if tools else None)
+
+            router_kwargs: dict[str, Any] = {
+                "mode": synthesis_mode,
+                "channel": channel,
+                "messages": messages,
+                "max_tokens": (
+                    NATURAL_CHAT_TOKENS
+                    if natural_chat_response and channel == "chat"
+                    else LEGAL_CHAT_TOKENS
+                    if channel == "chat"
+                    else VOICE_CHAT_TOKENS
+                ),
+            }
+            if active_tools is not None:
+                router_kwargs["tools"] = active_tools
+            if tools and active_tool_choice is not None:
+                router_kwargs["tool_choice"] = active_tool_choice
+            if token_callback is not None:
+                router_kwargs["token_callback"] = token_callback
+            if reasoning_callback is not None:
+                router_kwargs["reasoning_callback"] = reasoning_callback
+
+            response_content, response_usage, response_tool_calls = _coerce_router_response(router.complete(**router_kwargs))
+
+            if response_usage:
+                usage_dict = response_usage.to_dict()
+
+            # If LLM triggered a tool call and we have an executor, handle it
+            if response_tool_calls and tool_executor:
+                # 1. Append the assistant's tool call request to the message history
+                messages.append({
+                    "role": "assistant",
+                    "tool_calls": response_tool_calls
+                })
+                
+                # 2. Execute each tool and append the results
+                for tool_call in response_tool_calls:
+                    func_name = tool_call["function"]["name"]
+                    try:
+                        func_args = json.loads(tool_call["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        func_args = {}
+                    
+                    try:
+                        result_str = tool_executor(func_name, func_args)
+                    except Exception as e:
+                        result_str = f"Error executing tool {func_name}: {str(e)}"
+                        
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": func_name,
+                        "content": result_str
+                    })
+                
+                # Loop back to router.complete with the new tool results in messages
+                continue
+            
+            else:
+                # No tool calls, extract the final text and break the loop
+                llm_text = response_content
+                break
+
     if llm_text:
         candidate = llm_text.strip()
-        contract = validate_answer_contract(candidate, answer_type)
-        required_prefix = required_leading_prefix(answer_type)
-        if channel == "voice":
-            has_voice_structure = "Key Rule:" in candidate and (
-                "Next Action:" in candidate or "Source Warning:" in candidate or "Main Risk:" in candidate
-            )
-            if has_voice_structure:
-                answer = candidate
-        elif candidate.startswith(required_prefix) and contract.ok:
+        if natural_chat_response and channel == "chat":
             answer = candidate
+        else:
+            contract = validate_answer_contract(candidate, answer_type)
+            required_prefix = required_leading_prefix(answer_type)
+            if channel == "voice":
+                has_voice_structure = "Key Rule:" in candidate and (
+                    "Next Action:" in candidate or "Source Warning:" in candidate or "Main Risk:" in candidate
+                )
+                if has_voice_structure:
+                    answer = candidate
+            elif candidate.startswith(required_prefix) and contract.ok:
+                answer = candidate
+    elif natural_chat_response and channel == "chat":
+        answer = _build_natural_chat_fallback_answer(prompt=prompt, missing_facts=missing_facts)
+
+    if channel == "chat" and _contains_internal_fallback_scaffold(answer):
+        answer = _build_natural_chat_fallback_answer(prompt=prompt, missing_facts=missing_facts)
 
     answer = _apply_matter_cautions_to_answer(
         answer=answer,

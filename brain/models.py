@@ -1,3 +1,4 @@
+# /** file models.py shared legal brain dataclasses for Wakili reasoning [notes: allows critical triage risk severity for urgent liberty and deadline risks] */
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -8,12 +9,13 @@ BrainChannel = Literal["chat", "voice"]
 VerificationStatus = Literal["verified", "mixed", "unverified"]
 BurdenCertainty = Literal["GRAPH_EVIDENCED", "JURISDICTIONAL_DEFAULT", "STATUTORY_IMPLICIT", "UNKNOWN"]
 LimitationStatus = Literal["BARRED", "AT_RISK", "SAFE", "CANNOT_CONFIRM"]
+RiskSeverity = Literal["low", "medium", "high", "critical"]
 
 
 @dataclass(slots=True)
 class BrainRiskFlag:
     type: str
-    severity: Literal["low", "medium", "high"]
+    severity: RiskSeverity
     message: str
     mitigation: str
 
