@@ -69,7 +69,13 @@ LEGAL_CONCEPT_SEEDS: tuple[LegalConceptSeed, ...] = (
         doctrine_area="Land Law",
         jurisdiction_scope="mainland",
         definition="A right of occupancy grounded in customary tenure.",
-        aliases=("customary right of occupancy", "cro", "haki ya kumiliki ardhi kimila"),
+        aliases=(
+            "customary right of occupancy",
+            "certificate of customary right of occupancy",
+            "cro",
+            "ccro",
+            "haki ya kumiliki ardhi kimila",
+        ),
         broader=("customary_tenure",),
     ),
     LegalConceptSeed(

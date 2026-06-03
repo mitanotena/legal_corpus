@@ -34,7 +34,7 @@ class LimitationAnalysis:
 
 
 def is_limitation_prompt(prompt: str) -> bool:
-    normalized = " ".join(str(prompt or "").lower().split())
+    normalized = " ".join(_client_query_text(prompt).lower().split())
     if not normalized:
         return False
     cues = (
@@ -48,6 +48,18 @@ def is_limitation_prompt(prompt: str) -> bool:
         "12 years",
     )
     return any(cue in normalized for cue in cues)
+
+
+def _client_query_text(prompt: str) -> str:
+    """Extract the user-authored query from a structured synthesis prompt."""
+    text = str(prompt or "")
+    match = re.search(
+        r"(?is)\bCLIENT QUERY:\s*(.*?)(?:\n\s*<retrieval_warnings>|\n\s*<private_document_sources>|\n\s*RETRIEVED |\n\s*REQUESTED ANSWER SHAPE:|\Z)",
+        text,
+    )
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def analyze_limitation(
