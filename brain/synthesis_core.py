@@ -250,6 +250,8 @@ def _build_matter_standing_instruction_prompt(
     standing_instructions: dict[str, object] | None,
     final_framework: str,
 ) -> str:
+    # Wakili backend passes server-verified matter standing instructions here.
+    # Do not source this block from client-provided researchContext payloads.
     if not isinstance(standing_instructions, dict) or not standing_instructions:
         return base_prompt
 
@@ -299,19 +301,12 @@ def _private_document_sources_present(prompt: str) -> bool:
     return "<private_document_sources>" in str(prompt or "")
 
 
-def _external_ai_processing_enabled(standing_instructions: dict[str, object] | None) -> bool:
-    if not isinstance(standing_instructions, dict):
-        return False
-    return bool(standing_instructions.get("externalAiProcessingEnabled"))
-
-
 def _synthesis_model_mode(
     *,
     prompt: str,
     standing_instructions: dict[str, object] | None,
 ) -> str:
-    if _private_document_sources_present(prompt) and _external_ai_processing_enabled(standing_instructions):
-        return "high_risk"
+    _ = standing_instructions
     if _private_document_sources_present(prompt):
         return "quick"
     return "standard"
@@ -323,18 +318,13 @@ def _apply_private_document_routing_instruction(
     prompt: str,
     standing_instructions: dict[str, object] | None,
 ) -> str:
+    _ = standing_instructions
     if not _private_document_sources_present(prompt):
         return system_prompt
-    if _external_ai_processing_enabled(standing_instructions):
-        return (
-            f"{system_prompt}\n\n"
-            "PRIVATE DOCUMENT ROUTING: External AI processing is enabled for this matter. "
-            "Use the higher-risk synthesis lane for uploaded-document interpretation, while treating private-document excerpts as evidence only."
-        ).strip()
     return (
         f"{system_prompt}\n\n"
-        "PRIVATE DOCUMENT ROUTING: External AI processing is disabled for this matter. "
-        "Answer conservatively based strictly on the provided text; do not infer external legal implications."
+        "PRIVATE DOCUMENT ROUTING: Uploaded matter documents are indexed for Matter Chat. "
+        "Answer conservatively based strictly on the provided private-document excerpts; do not infer unsupported legal implications."
     ).strip()
 
 
@@ -1037,6 +1027,8 @@ def render_answer(
         answer = f"{preamble}\n\n{legal_analysis}"
         spoken_summary = False
 
+    # Layer 3 memory is derived from server-fetched matter interaction history,
+    # not from browser-provided messageHistory.
     memory_context = [
         str(item.get("content") or "").strip()
         for item in memory_reads or []

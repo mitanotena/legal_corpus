@@ -112,7 +112,6 @@ class BrainResult:
     dead_law_rewrites: list[str]
     graph_evidence: list[dict[str, Any]]
     memory_reads: list[dict[str, Any]]
-    memory_write_proposal: list[dict[str, Any]]
     supervision_status: str
     model_usage: BrainModelUsage
     reasoning_framework: ReasoningFramework
@@ -138,7 +137,6 @@ class BrainResult:
             "deadLawRewrites": list(self.dead_law_rewrites),
             "graphEvidence": list(self.graph_evidence),
             "memoryReads": list(self.memory_reads),
-            "memoryWriteProposal": list(self.memory_write_proposal),
             "supervisionStatus": self.supervision_status,
             "modelUsage": self.model_usage.to_dict(),
             "rendering": {
